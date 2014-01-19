@@ -1,55 +1,73 @@
 (ns ex1.core
-  (:require [clojure.java.io :refer [reader]])
+  (:require [ex1.vclock :as vclock]
+            [ex1.connector :as connector]
+            [clojure.java.io :refer [reader]])
   (:import java.net.InetAddress
-           java.net.Socket
-           java.net.ServerSocket
-           java.net.ConnectException
-           java.io.DataInputStream
-           java.io.DataOutputStream))
+           java.net.ServerSocket))
 
-(defn read-config-line [line]
-  (let [[id host port] (.split line " ")]
-    [(Long/valueOf id)
-     {:inet-addr (InetAddress/getByName host)
-      :port (Integer/parseInt port)}]))
+(defn safe-println [& args]
+  (locking *out*
+    (apply println args)))
+
+(defn read-config-line [^String line]
+  (let [[^String id host port] (.split line " ")]
+    {:id (Long/valueOf id)
+     :inet-addr (InetAddress/getByName host)
+     :port (Integer/parseInt port)}))
 
 (defn read-config [file-reader]
-  (doall (into {} (map read-config-line (line-seq file-reader)))))
+  (doall (map read-config-line (line-seq file-reader))))
 
-(defn create-server-socket [me]
-  (new ServerSocket (:port (val me))))
+(defn action-send [vclock remote-id connection my-id]
+  (send-off vclock
+            (fn [vclock]
+              (let [vclock (vclock/increment vclock my-id)]
+                (connector/send-message connection (str vclock))
+                (safe-println "s" remote-id (vec (vals vclock)))
+                vclock))))
 
-(defn accept-peers [server-socket others]
-  (loop [n (count others)
-         others others]
-    (if (zero? n)
-      others
-      (let [s (.accept server-socket)
-            id (.readLong (new DataInputStream (.getInputStream s)))]
-        (recur (dec n)
-               (assoc-in others [id :socket] s))))))
+(defn action-tick [vclock my-id n]
+  (send-off vclock
+            (fn [vclock]
+              (let [vclock (nth (iterate #(vclock/increment % my-id)
+                                         vclock)
+                                n)]
+                (safe-println "l" n)
+                vclock))))
 
-(defn loop-connect [{:keys [inet-addr port] :as peer}]
-  (if-let [s (try [(new Socket inet-addr port)]
-                  (catch ConnectException e
-                    nil))]
-    (first s)
-    (recur peer)))
-
-(defn connect-to-peer [me peer]
-  (with-open [s (loop-connect (val peer))]
-    (.writeLong (new DataOutputStream (.getOutputStream s)) (key me))))
-
-(defn connect-to-peers [me others]
-  (doseq [peer others]
-    (connect-to-peer me peer)))
+(defn receive [vclock my-id remote-id message]
+  (send-off vclock
+            (fn [vclock]
+              (let [vclock' (read-string message)
+                    vclock (-> vclock
+                               (vclock/increment my-id)
+                               (vclock/merge vclock'))]
+                (safe-println "r" remote-id
+                              (vec (vals vclock'))
+                              (vec (vals vclock)))
+                vclock))))
 
 (defn -main [& args]
-  (let [[config-file id] args
-        id (Long/valueOf id)
+  (let [[config-file ^String my-id] args
+        my-id (Long/valueOf my-id)
         config (with-open [r (reader config-file)]
                  (read-config r))
-        me (first (filter #(= id (key %)) config))
-        others (into {} (remove #(= id (key %)) config))]
-    (.start (new Thread (fn [] (connect-to-peers me others))))
-    (println (accept-peers (create-server-socket me) others))))
+        port (:port (first (filter #(= my-id (:id %)) config)))
+        peers (remove #(= my-id (:id %)) config)
+        server-socket (new ServerSocket port)
+        vclock (agent (vclock/empty (map :id config)))
+        connections (for [peer peers
+                          :let [r (partial receive vclock my-id (:id peer))]]
+                      [(:id peer)
+                       (connector/connect server-socket peer {:id my-id} r)])]
+    (doseq [[id c] connections] @c)
+    (dotimes [_ 100]
+      (if (zero? (rand-int 2))
+        (let [n (inc (rand-int 5))]
+          (action-tick vclock my-id n))
+        (let [[id c] (rand-nth connections)]
+          (action-send vclock id c my-id))))
+    (await vclock)
+    (doseq [[id c] connections]
+      (connector/disconnect c))
+    (shutdown-agents)))
