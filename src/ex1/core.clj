@@ -1,4 +1,8 @@
+;Jani Rahkola
+;013606996
+
 (ns ex1.core
+  (:gen-class)
   (:require [ex1.vclock :as vclock]
             [ex1.connector :as connector]
             [clojure.java.io :refer [reader]])
@@ -70,4 +74,5 @@
     (await vclock)
     (doseq [[id c] connections]
       (connector/disconnect c))
+    (await vclock)
     (shutdown-agents)))

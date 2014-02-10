@@ -1,3 +1,6 @@
+;Jani Rahkola
+;013606996
+
 (ns ex1.connector
   (:import java.net.Socket
            java.net.ServerSocket

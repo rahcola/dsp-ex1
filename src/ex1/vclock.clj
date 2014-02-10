@@ -1,3 +1,6 @@
+;Jani Rahkola
+;013606996
+
 (ns ex1.vclock
   (:refer-clojure :exclude [empty merge]))
 
